@@ -1,0 +1,308 @@
+/**
+* On Arduino
+* Implemented on Eclipse IDE, importing the FreeRTOS library for task management.
+*
+* Objective: For a robotic car, with an Arduino Uno as the brain, to move in 8 directions, 
+* play music (the baby shark song), blink 2 sets (front and back) of LEDs at different rates.
+* All this must be controlled by instructions received via bluetooth sent to the Serial port 
+* using a HC-06 bluetooth module.
+*
+* Bluetooth app sends 12 different characters based on buttons pressed:
+* Movement: f(forward), l(left), r(right), b(back), g(up left), q(up right), m(down left), a(down right), s(stop)
+* Other: c(connected), t(start of race), e(end of race)
+* 
+* App sends a movement char based on the direction button when it is pressed, and sends 's' when the 
+* button is lifted. Coded on MIT App Inventor.
+*
+*/
+
+#include <Arduino.h>
+#include <avr/io.h>
+#include <FreeRTOS.h>
+#include "queue.h"
+#include <task.h>
+
+#define STACK_SIZE 100 // Stack size of each task must be sufficiently small to be uploaded to the Arduino.
+#define R1 6 // right motors controlled via a DVR8833 H-bridge motor driver
+#define R2 9
+#define L1 3 // left motors controlled via a DVR8833 H-bridge motor driver
+#define L2 5
+
+#define RED1 2 // rear LEDs; 8 LEDs needed, arranged as 2 sets of 2 LEDs in parallel, in series with 2 other LEDs in parallel
+#define RED2 4
+
+#define D4  1701 //delayValue required to play desired note, in microseconds
+#define E4  1520
+#define Fs4 1351
+#define G4  1276
+#define Ab4 1205
+#define Bb4 1073
+#define Eb5 804
+#define Ab5 602
+#define buzzer 10
+
+#define dataPin 11 // inputs for 8 bit shift register, used to control the 8 front LEDs
+#define clockPin 12
+#define latchPin 8
+
+QueueHandle_t xQueueMotor;
+QueueHandle_t xQueueLedRear;
+QueueHandle_t xQueueLedFront;
+QueueHandle_t xQueueAudio;
+
+void tSerial(void *p) {
+	char bluetoothVal;
+	for (;;) {
+		if (Serial.available()) {
+			bluetoothVal = Serial.read();
+			Serial.println(bluetoothVal);
+			if (bluetoothVal == 't' || bluetoothVal == 'c'	|| bluetoothVal == 'e') {
+				xQueueSendToBack(xQueueAudio, &bluetoothVal,	( TickType_t ) portMAX_DELAY);
+			}
+			if (bluetoothVal != 'e' && bluetoothVal != 't') {
+				xQueueSendToBack(xQueueLedFront, &bluetoothVal,	( TickType_t ) portMAX_DELAY);
+			}
+			if (bluetoothVal != 't' && bluetoothVal != 'c' && bluetoothVal != 'e') {
+				xQueueSendToBack(xQueueMotor, &bluetoothVal, ( TickType_t ) portMAX_DELAY);
+				xQueueSendToBack(xQueueLedRear, &bluetoothVal,	( TickType_t ) portMAX_DELAY);
+			}
+		}
+	}
+}
+
+void tMotorControl(void *p) {
+	for (;;) {
+		char motion;
+		xQueueReceive(xQueueMotor, &motion, ( TickType_t ) portMAX_DELAY);
+		switch (motion) {
+		case 'f': //forward
+			analogWrite(L1, 200);
+			analogWrite(L2, 0);
+			analogWrite(R1, 0);
+			analogWrite(R2, 200);
+			break;
+		case 'b': //backward
+			analogWrite(L1, 0);
+			analogWrite(L2, 200);
+			analogWrite(R1, 200);
+			analogWrite(R2, 0);
+			break;
+		case 'l': //left
+			analogWrite(L1, 0);
+			analogWrite(L2, 0);
+			analogWrite(R1, 0);
+			analogWrite(R2, 200);
+			break;
+		case 'r': //right
+			analogWrite(L1, 200);
+			analogWrite(L2, 0);
+			analogWrite(R1, 0);
+			analogWrite(R2, 0);
+			break;
+		case 'm': //backward left
+			analogWrite(L1, 0);
+			analogWrite(L2, 100);
+			analogWrite(R1, 255);
+			analogWrite(R2, 0);
+			break;
+		case 'g': //left up
+			analogWrite(L1, 100);
+			analogWrite(L2, 0);
+			analogWrite(R1, 0);
+			analogWrite(R2, 255);
+			break;
+		case 'q': //right up
+			analogWrite(L1, 255);
+			analogWrite(L2, 0);
+			analogWrite(R1, 0);
+			analogWrite(R2, 100);
+			break;
+		case 'a': //backward right
+			analogWrite(L1, 0);
+			analogWrite(L2, 255);
+			analogWrite(R1, 100);
+			analogWrite(R2, 0);
+			break;
+		case 's': //stop
+		default:
+			digitalWrite(L1, 0);
+			digitalWrite(L2, 0);
+			digitalWrite(R1, 0);
+			digitalWrite(R2, 0);
+			break;
+		}
+	}
+}
+
+void tLedRear(void *p) {
+	char motion = 's';
+	for (;;) {
+		xQueueReceive(xQueueLedRear, &motion, (TickType_t ) 0);
+		switch (motion) {
+		case 's':
+			digitalWrite(RED1, HIGH);
+			digitalWrite(RED2, HIGH);
+			vTaskDelay(250);
+			if (xQueueReceive(xQueueLedRear, &motion, (TickType_t ) 0) == pdTRUE)
+				break;
+			digitalWrite(RED1, LOW);
+			digitalWrite(RED2, LOW);
+			vTaskDelay(250);
+			break;
+		default:
+			digitalWrite(RED1, HIGH);
+			digitalWrite(RED2, HIGH);
+			vTaskDelay(500);
+			if (xQueueReceive(xQueueLedRear, &motion, (TickType_t ) 0) == pdTRUE)
+				break;
+			digitalWrite(RED1, LOW);
+			digitalWrite(RED2, LOW);
+			vTaskDelay(500);
+			break;
+		}
+	}
+}
+
+void tLedFront(void *p) {
+	char motion = 's';
+	for (;;) {
+		xQueueReceive(xQueueLedFront, &motion, (TickType_t ) 0);
+		byte dataValues;
+		switch (motion) {
+		case 'c':
+			dataValues = 00000000;
+			digitalWrite(latchPin, LOW);
+			shiftOut(dataPin, clockPin, MSBFIRST, dataValues);
+			digitalWrite(latchPin, HIGH);
+			vTaskDelay(200);
+			dataValues = ~(00000000);
+			digitalWrite(latchPin, LOW);
+			shiftOut(dataPin, clockPin, MSBFIRST, dataValues);
+			digitalWrite(latchPin, HIGH);
+			vTaskDelay(200);
+			dataValues = 00000000;
+			digitalWrite(latchPin, LOW);
+			shiftOut(dataPin, clockPin, MSBFIRST, dataValues);
+			digitalWrite(latchPin, HIGH);
+			vTaskDelay(200);
+			break;
+		case 's':
+			dataValues = ~(00000000);
+			digitalWrite(latchPin, LOW);
+			shiftOut(dataPin, clockPin, MSBFIRST, dataValues);
+			digitalWrite(latchPin, HIGH);
+			vTaskDelay(500);
+			break;
+		default:
+			dataValues = 00000001;
+			for (int i = 0; i < 8; i++) {
+				digitalWrite(latchPin, LOW);
+				shiftOut(dataPin, clockPin, MSBFIRST, dataValues);
+				digitalWrite(latchPin, HIGH);
+				dataValues = dataValues << 1;
+				vTaskDelay(200);
+				if (xQueueReceive(xQueueLedFront, &motion, (TickType_t ) 0) == pdTRUE)
+					break;
+			}
+		}
+	}
+}
+
+void buzz(long delayValue, long numCycles) {
+	for (long i = 0; i < numCycles; i++) {
+		digitalWrite(buzzer, HIGH);
+		delayMicroseconds(delayValue);
+		digitalWrite(buzzer, LOW);
+		delayMicroseconds(delayValue);
+	}
+
+}
+
+void tAudio(void *p) {
+	char motion = 's';
+	for (;;) {
+		xQueueReceive(xQueueAudio, &motion, (TickType_t ) 0);
+		switch (motion) {
+		case 't':
+			int N;
+			for (N = 0; N < 3; N++) {
+				buzz(D4, 29);
+				vTaskDelay(200);
+				buzz(E4, 33);
+				vTaskDelay(200);
+				buzz(G4, 39);
+				vTaskDelay(200);
+				buzz(G4, 39);
+				vTaskDelay(200);
+				buzz(G4, 39);
+				vTaskDelay(200);
+				buzz(G4, 20);
+				vTaskDelay(100);
+				buzz(G4, 20);
+				vTaskDelay(300);
+				buzz(G4, 20);
+				vTaskDelay(100);
+				buzz(G4, 20);
+				vTaskDelay(275);
+				if (xQueueReceive(xQueueAudio, &motion, (TickType_t ) 0) == pdTRUE) break;
+			}
+			if (N < 3) break;
+			buzz(G4, 39);
+			vTaskDelay(200);
+			buzz(G4, 39);
+			vTaskDelay(200);
+			buzz(Fs4, 56);
+			vTaskDelay(1750);
+			break;
+		case 'e':
+			buzz(Bb4, 37);
+			vTaskDelay(70);
+			buzz(Ab4, 33);
+			vTaskDelay(70);
+			buzz(Eb5, 50);
+			vTaskDelay(70);
+			buzz(Ab5, 83);
+			xQueueReceive(xQueueAudio, &motion, (TickType_t ) portMAX_DELAY);
+			break;
+		case 'c':
+			buzz(Ab5, 66);
+			vTaskDelay(70);
+			buzz(Eb5, 50);
+			vTaskDelay(70);
+			buzz(Ab4, 33);
+			vTaskDelay(70);
+			buzz(Bb4, 40);
+			xQueueReceive(xQueueAudio, &motion, (TickType_t ) portMAX_DELAY);
+			break;
+		default:
+			vTaskDelay(100);
+		}
+	}
+}
+
+void setup() {
+	pinMode(L1, OUTPUT); //left motor
+	pinMode(L2, OUTPUT); //left motor
+	pinMode(R1, OUTPUT); //right motor
+	pinMode(R2, OUTPUT); //right motor
+	pinMode(RED1, OUTPUT);
+	pinMode(RED2, OUTPUT);
+	pinMode(latchPin, OUTPUT);
+	pinMode(clockPin, OUTPUT);
+	pinMode(dataPin, OUTPUT);
+	pinMode(buzzer, OUTPUT);
+	xQueueMotor = xQueueCreate(100, sizeof(char));
+	xQueueLedRear = xQueueCreate(100, sizeof(char));
+	xQueueLedFront = xQueueCreate(100, sizeof(char));
+	xQueueAudio = xQueueCreate(100, sizeof(char));
+	Serial.begin(9600);
+}
+
+void loop() {
+	xTaskCreate(tSerial, "SerialTask", STACK_SIZE, NULL, 0, NULL);
+	xTaskCreate(tMotorControl, "MotorControl", STACK_SIZE, NULL, 1, NULL);
+	xTaskCreate(tLedRear, "RearLeds", STACK_SIZE, NULL, 3, NULL);
+	xTaskCreate(tLedFront, "FrontLeds", STACK_SIZE, NULL, 2, NULL);
+	xTaskCreate(tAudio, "Audio", STACK_SIZE, NULL, 4, NULL);
+	vTaskStartScheduler();
+}
